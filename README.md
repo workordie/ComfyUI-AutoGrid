@@ -1,8 +1,15 @@
 # ComfyUI-GridSplit
 
-Auto-detect how a stitched image is divided and split it into its individual
-panels. **No model, no weights, CPU, any resolution.**
+Two complementary grid tools for ComfyUI — **no model, no weights, CPU, any resolution:**
 
+- **Auto Grid / Carousel Split** — detect how a stitched image is divided and split it into its panels.
+- **Grid Stitch** — the inverse: repeat one image into an R×C grid, scaled to a target megapixels.
+
+---
+
+## Auto Grid / Carousel Split
+
+Auto-detect how a stitched image is divided and split it into its individual panels.
 Handles three kinds of layout automatically:
 
 | Layout | example | how |
@@ -30,7 +37,7 @@ Validated: 2048² 2×2 → 4 tiles · 2728×1536 uneven 1×3 → 928/976/824 til
 
 ![Irregular collage split into 10 panels](images/example2_complexgrid.png)
 
-## Node: `Auto Grid / Carousel Split`
+### Inputs / outputs
 
 **Inputs**
 | name | what |
@@ -49,6 +56,29 @@ Validated: 2048² 2×2 → 4 tiles · 2728×1536 uneven 1×3 → 928/976/824 til
 
 `panels` is a list because panels have different sizes and can't share one batch tensor.
 A non-grid image passes through unchanged as a single panel.
+
+---
+
+## Grid Stitch
+
+The inverse of the splitter: take one image you like and **repeat it into an R×C grid**,
+scaled so the whole thing hits a target megapixel count. Cells preserve the image's
+aspect ratio (no distortion) and tile seamlessly.
+
+**Inputs**
+| name | what |
+|------|------|
+| `image` | the image to tile (a batch of N fills the cells cyclically; a single image just repeats) |
+| `rows`, `cols` | grid dimensions, e.g. 3×3 or 3×4 |
+| `megapixels` | target **total** size of the stitched grid |
+
+**Outputs**
+| name | what |
+|------|------|
+| `grid` | the stitched grid image |
+| `width`, `height` | final output dimensions |
+
+Example: a 1448² image at **3×4 @ 4 MP** → a 2308×1731 grid, each cell ~577×577, no distortion.
 
 ## Install
 ```bash

@@ -1,11 +1,15 @@
 """
-AutoGridSplit — detect the seams in a stitched grid / carousel / collage image
-and split it into its individual panels. No model, CPU, any resolution.
+ComfyUI-GridSplit nodes.
 
-Uses recursive guillotine decomposition, so it handles regular grids, uneven
-grids, AND irregular ("bento") collages where different regions have different
-split lines — as well as seamless (gutterless) grids.
+  AutoGridSplit — detect the seams in a stitched grid/carousel/collage and split
+                  it into its individual panels.
+  GridStitch    — the inverse: repeat one image into an R x C grid, scaled to a
+                  target total megapixels (no distortion; cell aspect = image aspect).
+
+No model, CPU, any resolution.
 """
+import torch
+import torch.nn.functional as F
 from .gridsplit import find_panels, slice_boxes, draw_preview
 
 
@@ -46,5 +50,49 @@ class AutoGridSplit:
         return (panels_out, len(panels_out), preview)
 
 
-NODE_CLASS_MAPPINGS = {"AutoGridSplit": AutoGridSplit}
-NODE_DISPLAY_NAME_MAPPINGS = {"AutoGridSplit": "Auto Grid / Carousel Split"}
+class GridStitch:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "rows": ("INT", {"default": 3, "min": 1, "max": 32}),
+                "cols": ("INT", {"default": 3, "min": 1, "max": 32}),
+                "megapixels": ("FLOAT", {"default": 4.0, "min": 0.1, "max": 100.0, "step": 0.1,
+                                         "tooltip": "Target TOTAL size of the stitched grid, in megapixels."}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "INT", "INT")
+    RETURN_NAMES = ("grid", "width", "height")
+    FUNCTION = "stitch"
+    CATEGORY = "image/grid"
+
+    def stitch(self, image, rows, cols, megapixels):
+        B, H, W, C = image.shape
+        aspect = W / H
+        target_px = max(1.0, megapixels * 1_000_000.0)
+        # aspect-preserving cell whose rows*cols copies tile to ~target_px
+        h_c = max(1, int(round((target_px / (rows * cols * aspect)) ** 0.5)))
+        w_c = max(1, int(round(aspect * h_c)))
+        # resize every input image to the cell size (antialiased for clean down-scaling)
+        chw = image.permute(0, 3, 1, 2)
+        resized = F.interpolate(chw, size=(h_c, w_c), mode="bicubic",
+                                antialias=True, align_corners=False).clamp(0.0, 1.0)
+        resized = resized.permute(0, 2, 3, 1)
+        out = torch.empty(1, rows * h_c, cols * w_c, C, dtype=image.dtype, device=image.device)
+        for r in range(rows):
+            for c in range(cols):
+                idx = (r * cols + c) % B          # batch=1 -> repeat; batch>1 -> fill cells cyclically
+                out[0, r * h_c:(r + 1) * h_c, c * w_c:(c + 1) * w_c, :] = resized[idx]
+        return (out, cols * w_c, rows * h_c)
+
+
+NODE_CLASS_MAPPINGS = {
+    "AutoGridSplit": AutoGridSplit,
+    "GridStitch": GridStitch,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "AutoGridSplit": "Auto Grid / Carousel Split",
+    "GridStitch": "Grid Stitch (repeat → grid)",
+}

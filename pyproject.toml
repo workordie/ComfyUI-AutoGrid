@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-gridsplit"
-description = "Auto-detect seams in stitched grid/carousel/collage images and split into panels — no model, any resolution, even/uneven/irregular layouts."
+description = "Grid tools for ComfyUI: split a stitched grid/carousel/collage into panels, and stitch one image into an RxC grid — no model, any resolution."
 version = "1.0.0"
 license = { text = "MIT" }
 dependencies = []
