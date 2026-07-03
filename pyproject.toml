@@ -1,13 +1,13 @@
 [project]
-name = "comfyui-gridsplit"
-description = "Grid tools for ComfyUI: split a stitched grid/carousel/collage into panels, and stitch one image into an RxC grid — no model, any resolution."
-version = "1.0.0"
+name = "comfyui-autogrid"
+description = "Auto Grid — grid tools for ComfyUI: auto-detect and split a stitched grid/carousel/collage into panels, and stitch images into a grid with an interactive in-node picker (auto preserve / manual crop-to-ratio). No model, any resolution."
+version = "1.1.0"
 license = { text = "MIT" }
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/workordie/ComfyUI-GridSplit"
+Repository = "https://github.com/workordie/ComfyUI-AutoGrid"
 
 [tool.comfy]
 PublisherId = "workordie"
-DisplayName = "ComfyUI-GridSplit"
+DisplayName = "ComfyUI-AutoGrid"
