@@ -51,18 +51,22 @@ class AutoGridSplit:
 
 
 class GridStitch:
+    """Single image -> R x C grid, same engine as the advanced node
+    (ImageStitch-style), scaled to a target megapixels. The one image fills
+    every cell. It's the multi-image node with a single input, for quick
+    single-image grids."""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "image": ("IMAGE",),
-                "rows": ("INT", {"default": 3, "min": 1, "max": 32}),
-                "cols": ("INT", {"default": 3, "min": 1, "max": 32}),
+                "rows": ("INT", {"default": 2, "min": 1, "max": 4}),
+                "cols": ("INT", {"default": 2, "min": 1, "max": 4}),
                 "megapixels": ("FLOAT", {"default": 4.0, "min": 0.1, "max": 100.0, "step": 0.1,
                                          "tooltip": "Target TOTAL size of the stitched grid, in megapixels."}),
-                "scale_method": (["nearest-exact", "bilinear", "area", "bicubic", "lanczos"],
-                                 {"default": "bicubic",
-                                  "tooltip": "Resampling filter (same set as ComfyUI's Upscale Image). bicubic/lanczos = sharp; area = clean downscale; nearest-exact = blocky."}),
+                "scale_method": (["lanczos", "bicubic", "area", "bilinear", "nearest-exact"],
+                                 {"default": "lanczos"}),
             }
         }
 
@@ -72,22 +76,15 @@ class GridStitch:
     CATEGORY = "image/grid"
 
     def stitch(self, image, rows, cols, megapixels, scale_method):
-        B, H, W, C = image.shape
-        aspect = W / H
-        target_px = max(1.0, megapixels * 1_000_000.0)
-        # aspect-preserving cell whose rows*cols copies tile to ~target_px
-        h_c = max(1, int(round((target_px / (rows * cols * aspect)) ** 0.5)))
-        w_c = max(1, int(round(aspect * h_c)))
-        # resize each cell with ComfyUI's own upscaler (identical to the Upscale Image node)
-        samples = image.movedim(-1, 1)  # [B,H,W,C] -> [B,C,H,W]
-        resized = comfy.utils.common_upscale(samples, w_c, h_c, scale_method, "disabled")
-        resized = resized.movedim(1, -1).clamp(0.0, 1.0)  # -> [B,h_c,w_c,C]
-        out = torch.empty(1, rows * h_c, cols * w_c, C, dtype=image.dtype, device=image.device)
-        for r in range(rows):
-            for c in range(cols):
-                idx = (r * cols + c) % B          # batch=1 -> repeat; batch>1 -> fill cells cyclically
-                out[0, r * h_c:(r + 1) * h_c, c * w_c:(c + 1) * w_c, :] = resized[idx]
-        return (out, cols * w_c, rows * h_c)
+        cell = _to_chw(image)                       # one image -> every cell
+        cells = [cell] * (rows * cols)
+        grid = stitch_imagestitch_style(cells, rows, cols, scale_method)
+        gh, gw = grid.shape[1], grid.shape[2]
+        scale = (max(1.0, megapixels * 1_000_000.0) / (gh * gw)) ** 0.5
+        out_h, out_w = max(1, round(gh * scale)), max(1, round(gw * scale))
+        grid = comfy.utils.common_upscale(grid.unsqueeze(0), out_w, out_h, scale_method, "disabled")[0]
+        out = grid.movedim(0, -1).unsqueeze(0).clamp(0.0, 1.0)
+        return (out, out_w, out_h)
 
 
 def _to_chw(img):
@@ -137,6 +134,53 @@ def stitch_imagestitch_style(cells, rows, cols, scale_method="lanczos", empty_co
     return torch.cat(_match_channels(finals), dim=1)                   # concat along height -> [C,H,W]
 
 
+RATIOS = ["1:1", "3:4", "4:3", "2:3", "3:2", "4:5", "9:16", "16:9"]
+
+
+def _parse_ratio(s):
+    """'3:4' -> width/height aspect (0.75)."""
+    try:
+        w, h = s.split(":")
+        return float(w) / float(h)
+    except Exception:
+        return 1.0
+
+
+def _center_crop_to_aspect(chw, aspect):
+    """Center-crop [C,H,W] so width/height == aspect (no scaling, just crop)."""
+    _, h, w = chw.shape
+    if w / h > aspect:                       # too wide -> trim the sides
+        nw = max(1, int(round(h * aspect)))
+        x0 = (w - nw) // 2
+        return chw[:, :, x0:x0 + nw]
+    nh = max(1, int(round(w / aspect)))      # too tall -> trim top/bottom
+    y0 = (h - nh) // 2
+    return chw[:, y0:y0 + nh, :]
+
+
+def stitch_uniform(cells, rows, cols, aspect, scale_method, base_h=512):
+    """Manual mode: center-crop every image to `aspect`, resize to one shared cell
+    size, tile row-major into a clean rows x cols rectangle. Empty cells -> black."""
+    ch = base_h
+    cw = max(1, int(round(base_h * aspect)))
+    ref = next((c for c in cells if c is not None), None)
+    device = ref.device if ref is not None else "cpu"
+    dtype = ref.dtype if ref is not None else torch.float32
+
+    def resize(chw, h, w):
+        return comfy.utils.common_upscale(chw.unsqueeze(0), w, h, scale_method, "disabled")[0]
+
+    tiles = []
+    for cell in cells:
+        if cell is None:
+            tiles.append(torch.zeros(3, ch, cw, device=device, dtype=dtype))
+        else:
+            tiles.append(resize(_center_crop_to_aspect(cell, aspect), ch, cw))
+    tiles = _match_channels(tiles)
+    strips = [torch.cat(tiles[r * cols:(r + 1) * cols], dim=2) for r in range(rows)]
+    return torch.cat(strips, dim=1)          # [C, rows*ch, cols*cw]
+
+
 class GridStitchAdvanced:
     """Stitch multiple (different-size) images into an R x C grid, ImageStitch-style,
     scaled to a target megapixels. image_i -> cell i (row-major); empty cells -> black."""
@@ -146,8 +190,12 @@ class GridStitchAdvanced:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "rows": ("INT", {"default": 2, "min": 1, "max": 8}),
-                "cols": ("INT", {"default": 2, "min": 1, "max": 8}),
+                "rows": ("INT", {"default": 2, "min": 1, "max": 4}),
+                "cols": ("INT", {"default": 2, "min": 1, "max": 4}),
+                "mode": (["auto", "manual"], {"default": "auto",
+                         "tooltip": "auto = preserve every image, no cropping (cells can differ). manual = center-crop every image to one ratio for a uniform grid."}),
+                "ratio": (RATIOS, {"default": "3:4",
+                          "tooltip": "Manual mode only: the aspect every image is center-cropped to before stitching."}),
                 "megapixels": ("FLOAT", {"default": 4.0, "min": 0.1, "max": 100.0, "step": 0.1,
                                          "tooltip": "Target TOTAL size of the stitched grid."}),
                 "scale_method": (["lanczos", "bicubic", "area", "bilinear", "nearest-exact"],
@@ -161,13 +209,16 @@ class GridStitchAdvanced:
     FUNCTION = "stitch"
     CATEGORY = "image/grid"
 
-    def stitch(self, rows, cols, megapixels, scale_method, **kwargs):
+    def stitch(self, rows, cols, mode, ratio, megapixels, scale_method, **kwargs):
         n = rows * cols
         cells = []
         for i in range(1, n + 1):
             img = kwargs.get(f"image_{i}")
             cells.append(_to_chw(img) if img is not None else None)
-        grid = stitch_imagestitch_style(cells, rows, cols, scale_method)
+        if mode == "manual":
+            grid = stitch_uniform(cells, rows, cols, _parse_ratio(ratio), scale_method)
+        else:
+            grid = stitch_imagestitch_style(cells, rows, cols, scale_method)
         gh, gw = grid.shape[1], grid.shape[2]
         scale = (max(1.0, megapixels * 1_000_000.0) / (gh * gw)) ** 0.5
         out_h, out_w = max(1, round(gh * scale)), max(1, round(gw * scale))
@@ -183,6 +234,6 @@ NODE_CLASS_MAPPINGS = {
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AutoGridSplit": "Auto Grid / Carousel Split",
-    "GridStitch": "Grid Stitch (repeat → grid)",
-    "GridStitchAdvanced": "Grid Stitch Advanced (multi-image)",
+    "GridStitch": "Auto Grid / Stitch (one image)",
+    "GridStitchAdvanced": "Auto Grid / Stitch Advanced (multi-image)",
 }
